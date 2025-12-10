@@ -1,0 +1,225 @@
+# =============================================================
+# 0️⃣ IMPORTS + NLTK DOWNLOAD
+# =============================================================
+from google.colab import files
+import pandas as pd
+import numpy as np
+import json
+import re
+import os
+from glob import glob
+import zipfile
+import chardet
+from tqdm.auto import tqdm
+
+# NLP imports
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import sent_tokenize, word_tokenize
+from collections import Counter
+
+# ML imports
+from sklearn.feature_extraction.text import TfidfVectorizer
+from IPython.display import display, HTML
+
+# Download all required NLTK packages
+nltk.download("punkt", quiet=True)
+nltk.download("punkt_tab", quiet=True)   # important
+nltk.download("stopwords", quiet=True)
+
+STOPWORDS = set(stopwords.words("english"))
+
+print("✔ Libraries imported & NLTK data loaded")
+
+
+# =============================================================
+# 1️⃣ FILE UPLOAD
+# =============================================================
+uploaded = files.upload()
+
+filename = list(uploaded.keys())[0]
+print("✔ Uploaded file:", filename)
+
+
+# =============================================================
+# 2️⃣ READ CSV WITH AUTO ENCODING DETECTION
+# =============================================================
+with open(filename, "rb") as f:
+    enc = chardet.detect(f.read())["encoding"]
+
+df = pd.read_csv(filename, encoding=enc, on_bad_lines="skip").fillna("")
+
+print("✔ Detected encoding:", enc)
+
+# Pick the longest text column automatically
+text_column = max(df.columns, key=lambda c: df[c].astype(str).str.len().sum())
+print("✔ Using text column:", text_column)
+
+
+# =============================================================
+# 3️⃣ CLEANING + TOKENIZATION PIPELINE
+# =============================================================
+
+def clean_text_basic(text):
+    """Lowercase, remove URLs, special chars, stopwords."""
+    if pd.isna(text):
+        return ""
+
+    text = str(text).lower()
+    text = re.sub(r"http\S+|www\S+", "", text)
+    text = re.sub(r"[^a-zA-Z0-9 ]", " ", text)
+
+    tokens = [w for w in text.split() if w not in STOPWORDS]
+    return " ".join(tokens)
+
+
+df["cleaned_text"] = df[text_column].apply(clean_text_basic)
+df = df[df["cleaned_text"].str.strip() != ""]
+
+print("✔ Basic cleaning completed")
+
+
+# -------------------------------------------------------------
+# Tokenization
+# -------------------------------------------------------------
+stop_words = set(stopwords.words("english"))
+
+def tokenize_text(text):
+    if pd.isna(text) or text == "":
+        return []
+    words = word_tokenize(str(text).lower())
+    return [w for w in words if w.isalpha() and w not in stop_words]
+
+df["tokens"] = df["cleaned_text"].apply(tokenize_text)
+
+print("✔ Tokenization completed")
+
+
+# -------------------------------------------------------------
+# Frequency Table
+# -------------------------------------------------------------
+all_words = [word for tokens in df["tokens"] for word in tokens]
+freq_table = Counter(all_words)
+
+print("✔ Frequency table created")
+print("Top 10 words:", freq_table.most_common(10))
+
+
+# -------------------------------------------------------------
+# Sentence Scoring
+# -------------------------------------------------------------
+def score_sentences(text):
+    if pd.isna(text) or text == "":
+        return {}
+
+    sentences = sent_tokenize(text)
+    sentence_values = {}
+
+    for s in sentences:
+        tokens = tokenize_text(s)
+        score = sum(freq_table.get(w, 0) for w in tokens)
+        if score > 0:
+            sentence_values[s] = score
+
+    return sentence_values
+
+df["sentence_scores"] = df["cleaned_text"].apply(score_sentences)
+
+print("✔ Sentence scoring completed")
+
+
+# =============================================================
+# 4️⃣ TF-IDF BASED SUMMARIZATION
+# =============================================================
+
+def clean_for_tfidf(text):
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[^\w\s.,?]', '', text)
+    tokens = [t for t in word_tokenize(text.lower()) if t not in stop_words]
+    return " ".join(tokens)
+
+def clean_sentences(text):
+    sents = sent_tokenize(text)
+    cleaned = []
+    seen = set()
+    for s in sents:
+        c = clean_for_tfidf(s)
+        if len(c) < 5:
+            continue
+        if c in seen:
+            continue
+        seen.add(c)
+        cleaned.append(s)
+    return cleaned
+
+def generate_summary(text, n):
+    sentences = clean_sentences(text)
+    if not sentences:
+        return ["No content"]
+
+    n = min(n, len(sentences))
+    cleaned = [clean_for_tfidf(s) for s in sentences]
+
+    tfidf = TfidfVectorizer()
+    mat = tfidf.fit_transform(cleaned)
+    scores = mat.sum(axis=1).A1
+    idx = scores.argsort()[::-1][:n]
+
+    return [sentences[i] for i in idx]
+
+
+# Combine entire dataset into one text block
+full_text = " ".join(df[text_column].astype(str).tolist())
+
+summary1 = generate_summary(full_text, 30)
+summary2 = generate_summary(full_text, 20)
+summary3 = generate_summary(full_text, 8)
+
+
+# =============================================================
+# 5️⃣ DISPLAY UI SUMMARY
+# =============================================================
+def format_point(text, max_chars=250):
+    text = text.strip()
+    if len(text)a > max_chars:
+        text = text[:max_chars] + "..."
+    return f"{text} <span style='color:#666;font-size:11px;'>({len(text)} chars)</span>"
+
+summary1 = [format_point(s) for s in summary1]
+summary2 = [format_point(s) for s in summary2]
+summary3 = [format_point(s) for s in summary3]
+
+# Beautified HTML Output
+html = f"""
+<style>
+.container {{ display: flex; gap: 20px; align-items: flex-start; }}
+.box {{ width: 33%; padding: 18px; border-radius: 18px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }}
+.title {{ font-weight: bold; text-align: center; margin-bottom: 14px; font-size: 18px; }}
+ol {{ padding-left: 20px; }}
+li {{ margin-bottom: 10px; line-height: 1.3; font-size: 13px; color: #222; }}
+</style>
+
+<h1 style="text-align:center; padding:15px; margin-bottom:20px;
+ background: linear-gradient(90deg,#4A90E2,#50E3C2); color:white;border-radius:12px;">
+📘 Final Summaries Output (Optimized)
+</h1>
+
+<div class="container">
+    <div class="box" style="background: #eaf2ff;">
+        <h2 class="title" style="color:#1A73E8;">📘 Detailed Summary (30 Lines)</h2>
+        <ol>{''.join([f"<li>{s}</li>" for s in summary1])}</ol>
+    </div>
+
+    <div class="box" style="background: #ddffe8;">
+        <h2 class="title" style="color:#0F9D58;">🍏 Key Concepts (20 Lines)</h2>
+        <ol>{''.join([f"<li>{s}</li>" for s in summary2])}</ol>
+    </div>
+
+    <div class="box" style="background: #ffe3e3;">
+        <h2 class="title" style="color:#DB4437;">⭐ Important Takeaways (8 Lines)</h2>
+        <ol>{''.join([f"<li>{s}</li>" for s in summary3])}</ol>
+    </div>
+</div>
+"""
+
+display(HTML(html))
